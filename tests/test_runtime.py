@@ -37,9 +37,8 @@ def test_no_change_returns_none(vault):
 
 def test_set_via_next_message(vault):
     rt = rt_for(vault)
-    assert rt.on_pre_gateway_dispatch(ev("/secret set mykey")) is None
-    reply = rt.handle_command("set mykey", source=ev("").source)
-    assert "next message" in reply
+    r = rt.on_pre_gateway_dispatch(ev("/secret set mykey"))
+    assert r == {"action": "skip", "reason": "secret-vault awaiting next-message value"}
     r = rt.on_pre_gateway_dispatch(ev("super-secret-value-123"))
     assert r["action"] == "skip"
     assert vault.get("mykey") == "super-secret-value-123"
@@ -49,12 +48,12 @@ def test_set_via_next_message(vault):
     assert vault.get("k2") is None
 
 
-def test_set_inline_value_kept_out_of_text(vault):
+def test_set_inline_value_skipped_not_forwarded(vault):
     rt = rt_for(vault)
     r = rt.on_pre_gateway_dispatch(ev("/secret set tok abc-123-xyz"))
-    assert r == {"action": "rewrite", "text": "/secret set tok --stored-inline"}
+    assert r["action"] == "skip"
+    assert r["reason"] == "secret-vault stored inline"
     assert vault.get("tok") == "abc-123-xyz"
-    assert "stored tok" in rt.handle_command("set tok --stored-inline")
 
 
 def test_list_rm_show(vault):
@@ -67,6 +66,36 @@ def test_list_rm_show(vault):
     assert rt.handle_command("rm alpha") == "removed alpha"
     assert "usage" in rt.handle_command("")
 
+
+def test_secret_commands_skip_even_when_agent_would_be_busy(vault):
+    """Simulate Hermes busy path: /secret must be consumed at pre_gateway_dispatch
+    so it never reaches interrupt / the model. Gateway reply is best-effort."""
+    rt = rt_for(vault)
+    vault.set("demo", "demo-value-xyz")
+    sent = []
+
+    class _Adapter:
+        async def send(self, chat_id, text, metadata=None):
+            sent.append((chat_id, text))
+
+    class _Gateway:
+        def _delivery_adapter_for(self, source):
+            return _Adapter()
+
+    gw = _Gateway()
+    import asyncio
+
+    async def _run():
+        r_rm = rt.on_pre_gateway_dispatch(ev("/secret rm demo"), gateway=gw)
+        assert r_rm == {"action": "skip", "reason": "secret-vault handled /secret"}
+        assert vault.get("demo") is None
+        r_list = rt.on_pre_gateway_dispatch(ev("/secret list"), gateway=gw)
+        assert r_list["action"] == "skip"
+        await asyncio.sleep(0)  # let create_task reply coroutines run
+        assert any("0 secret" in t for _, t in sent)
+        assert any("removed demo" in t for _, t in sent)
+
+    asyncio.run(_run())
 
 def test_known_value_redacted_inbound_even_without_pattern(vault):
     rt = rt_for(vault)

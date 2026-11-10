@@ -1,8 +1,17 @@
 """Hook callbacks and the /secret command. Every Hermes hook used here exists in
 hermes_cli/plugins.py VALID_HOOKS (v0.23): pre_gateway_dispatch, pre_tool_call,
-transform_tool_result, transform_terminal_output, transform_llm_output."""
+transform_tool_result, transform_terminal_output, transform_llm_output.
+
+Gateway busy note (Hermes v0.23): ``pre_gateway_dispatch`` runs once at ingress,
+before the busy fast-path. Built-in slash commands declare ``busy_policy`` on
+``CommandDef`` and are dispatched mid-run; plugin ``register_command`` handlers
+are not in that registry, so a mid-run ``/secret`` would otherwise fall through
+to ``busy_input_mode: interrupt`` ("Interrupting current task") and never reach
+the plugin. All ``/secret`` commands are therefore handled here and skipped so
+they never interrupt the agent or reach the model."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -45,6 +54,38 @@ class SecretVaultRuntime:
         return (str(plat or ""), str(getattr(source, "chat_id", "") or ""),
                 str(getattr(source, "user_id", "") or ""))
 
+    @staticmethod
+    def _send_gateway_reply(gateway: Any, event: Any, text: str) -> None:
+        """Best-effort reply on the gateway path. Failures must not block skip."""
+        if not gateway or not text or event is None:
+            return
+        try:
+            source = getattr(event, "source", None)
+            chat_id = getattr(source, "chat_id", None) if source is not None else None
+            if chat_id is None:
+                return
+            adapter = gateway._delivery_adapter_for(source)
+            if adapter is None:
+                return
+            # metadata omitted: avoid private gateway helpers (catalog rule 9).
+            coro = adapter.send(str(chat_id), text)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            task = loop.create_task(coro)
+
+            def _done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                err = t.exception()
+                if err is not None:
+                    log.warning("secret-vault: gateway reply failed: %s", err)
+
+            task.add_done_callback(_done)
+        except Exception:
+            log.warning("secret-vault: could not send gateway reply", exc_info=True)
+
     def scrub_text(self, text: str) -> str:
         """Detect secrets in *text*, store them, return text with placeholders. Known vault
         values are replaced too, even if no pattern matches them."""
@@ -65,12 +106,17 @@ class SecretVaultRuntime:
         log.info("secret-vault: replaced %d secret(s) with placeholders", len(findings))
         return detect.substitute(text, findings, names)
 
+    def _finish_gateway_command(self, gateway: Any, event: Any, reply: str, reason: str):
+        self._send_gateway_reply(gateway, event, reply)
+        return {"action": "skip", "reason": reason}
+
     # -- hooks -----------------------------------------------------------------------------------
-    def on_pre_gateway_dispatch(self, event: Any = None, **_: Any):
+    def on_pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **_: Any):
         text = getattr(event, "text", None)
         if not isinstance(text, str) or not text:
             return None
-        key = self._source_key(getattr(event, "source", None))
+        source = getattr(event, "source", None)
+        key = self._source_key(source)
         stripped = text.strip()
         with self._lock:
             pending = self._pending.pop(key, None)
@@ -79,17 +125,37 @@ class SecretVaultRuntime:
             if time.time() - ts <= PENDING_TTL_S:
                 self.vault.set(name, stripped)
                 # Dropped: the value never reaches the agent, the transcript or the model.
-                return {"action": "skip", "reason": "secret-vault captured a value"}
+                reply = (f"stored {name}. Delete that chat message on the platform. "
+                         f"Use {detect.placeholder(name)} in requests.")
+                return self._finish_gateway_command(
+                    gateway, event, reply, "secret-vault captured a value")
+            # Expired pending: fall through as a normal message.
+
         parts = stripped.split()
-        if len(parts) >= 3 and parts[0].lower() == "/secret" and parts[1].lower() == "set":
-            with self._lock:
-                self._pending[key] = (parts[2], time.time())
-            if len(parts) > 3:  # value typed inline: store it, keep it out of the command text
-                self.vault.set(parts[2], " ".join(parts[3:]))
+        if parts and parts[0].lower() == "/secret":
+            # Handle every /secret* here (idle or busy). Plugin register_command is not on
+            # Hermes' busy CommandDef path, so mid-run /secret would otherwise interrupt.
+            raw_args = stripped.split(None, 1)[1] if len(parts) > 1 else ""
+            arg_parts = raw_args.split()
+            if (len(arg_parts) >= 2 and arg_parts[0].lower() == "set"
+                    and "--stored-inline" not in arg_parts[1:]
+                    and detect.NAME_RE.match(arg_parts[1] or "")):
+                name = arg_parts[1]
+                if len(arg_parts) > 2:
+                    self.vault.set(name, " ".join(arg_parts[2:]))
+                    reply = (f"stored {name}. The value was typed inline; delete that chat "
+                             f"message on the platform. Use {detect.placeholder(name)} in requests.")
+                    return self._finish_gateway_command(
+                        gateway, event, reply, "secret-vault stored inline")
                 with self._lock:
-                    self._pending.pop(key, None)
-                return {"action": "rewrite", "text": f"/secret set {parts[2]} --stored-inline"}
-            return None
+                    self._pending[key] = (name, time.time())
+                reply = self.handle_command(f"set {name}", source=source)
+                return self._finish_gateway_command(
+                    gateway, event, reply, "secret-vault awaiting next-message value")
+            reply = self.handle_command(raw_args, source=source)
+            return self._finish_gateway_command(
+                gateway, event, reply, "secret-vault handled /secret")
+
         new = self.scrub_text(text)
         if new != text:
             return {"action": "rewrite", "text": new}
