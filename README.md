@@ -5,11 +5,12 @@ Secrets you paste in a chat are swapped for `{{SECRET:name}}` placeholders befor
 When the model passes a placeholder to a tool, the plugin substitutes the real value just before the
 tool runs, and it redacts the value from whatever the tool returns.
 
-Version 0.1.0. Requires Hermes Agent >= 0.23. MIT licensed.
+Version 0.1.1. Requires Hermes Agent >= 0.23. MIT licensed.
 
-> **Status: early.** Tested with pytest on Linux and checked with `hermes plugins validate`. DPAPI and
-> behaviour inside a live gateway have not been verified yet. Read [Coverage gaps](#coverage-gaps) before
-> relying on it.
+> **Status: early.** pytest passes on Windows (including DPAPI) and Linux; `hermes plugins validate`
+> passes. Read [Coverage gaps](#coverage-gaps) before relying on it.
+
+![secret-vault cover](assets/cover.png)
 
 ## How it works
 
@@ -27,13 +28,21 @@ tokens, Google `AIza…`, Slack `xox[abposr]-…`, `-----BEGIN … PRIVATE KEY--
 
 ## Commands
 
+`/secret` is handled at gateway ingress (`pre_gateway_dispatch`), so it still works while the agent
+is busy: it does not interrupt the running turn and is not sent to the model.
+
 - `/secret set <name>`: your next message in the same chat (within 120 s) is stored as the value and
   dropped before it reaches the agent. Delete that message on the platform afterwards; the platform
-  itself still has it. `/secret set <name> <value>` also works, and the command text is rewritten so the
-  value does not travel further, but it does stay in the chat history.
+  itself still has it. `/secret set <name> <value>` also works; delete that chat message afterwards.
 - `/secret list`: lists names only, plus the active backend.
 - `/secret rm <name>`
 - `/secret show-placeholder <name>`: prints `{{SECRET:name}}`.
+
+## Screenshots
+
+Telegram live check (set → list → placeholder → resolve → redact → rm):
+
+![Telegram test](assets/screenshots/01-telegram-test.png)
 
 ## Storage
 
@@ -88,7 +97,7 @@ secret-vault 是 Hermes Agent 的外掛，用來不讓 API 金鑰之類的機密
 輸出也會把機密遮蔽掉。
 
 - **偵測：** OpenAI、GitHub、AWS、Telegram Bot、Google、Slack 金鑰、私鑰區塊，以及高熵字串。
-- **指令：**
+- **指令：** `/secret` 在 gateway 進線時就由外掛處理，agent 忙碌時也不會中斷任務、不會送進模型。
   - `/secret set <名稱>`：下一則訊息會被當成值存起來，不會送給 agent。存完請到平台上刪掉那則訊息。
   - `/secret list`：只列出名稱。
   - `/secret rm <名稱>`
@@ -99,12 +108,15 @@ secret-vault 是 Hermes Agent 的外掛，用來不讓 API 金鑰之類的機密
   - 只有 gateway 平台（Telegram、Discord 等）的訊息會被替換。CLI、TUI、Desktop 的輸入目前沒有可改寫的 hook，
     機密會原樣送進模型和紀錄。
   - 換回真值後的工具參數，其他外掛的觀察 hook 看得到。
-  - 平台上的原始訊息還在。
+  - 平台上的原始訊息還在，要自己刪。
   - 偵測是啟發式的，可能漏抓。
 
   完整清單見上面的 Coverage gaps。
-- **狀態：** 0.1.0 初版。Linux 上的 pytest 和 `hermes plugins validate` 都通過了。Windows DPAPI 和實際
-  gateway 上的行為還沒驗證。
+- **狀態：** 0.1.1。Windows（含 DPAPI）與 Linux 的 pytest、`hermes plugins validate` 都通過。
+
+### 截圖
+
+![Telegram 測試](assets/screenshots/01-telegram-test.png)
 
 ## License
 

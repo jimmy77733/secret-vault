@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 - 2026-11-10
+
+### Fixed
+- `/secret` commands are handled in `pre_gateway_dispatch` (before the Hermes busy
+  fast-path) so they work while the agent is running: no "Interrupting current task",
+  no vault miss, and the command never reaches the model. Hermes v0.23 only applies
+  `busy_policy` to built-in `CommandDef` entries; plugin `register_command` handlers
+  are not on that path.
+
 ## 0.1.0 - 2026-11-10
 
 ### Added
