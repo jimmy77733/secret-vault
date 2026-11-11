@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.2 - 2026-11-11
+
+### Fixed
+- `/secret` and next-message value capture now run in `post_gateway_admission`, after
+  gateway authorization and pairing, so unpaired senders cannot list, delete, or overwrite
+  vault entries.
+- Replies use the public `{"action": "handled", "reply": text}` hook result instead of the
+  private `gateway._delivery_adapter_for` method.
+- Inbound `scrub_text` no longer writes detected values to the vault before admission.
+  `pre_gateway_dispatch` only rewrites the text; stores are committed when the same message
+  is admitted.
+- The vault is resolved per call and cached by `get_hermes_home()`, so a gateway serving
+  several profiles no longer shares one profile's vault across all of them.
+
+### Changed
+- README notes that `pre_tool_call` substitution runs before Hermes' approval prompt, so an
+  approval prompt for that tool call may show the real secret in chat.
+
 ## 0.1.1 - 2026-11-10
 
 ### Fixed

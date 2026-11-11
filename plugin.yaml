@@ -1,13 +1,13 @@
 manifest_version: 2
 name: secret-vault
-version: "0.1.1"
+version: "0.1.2"
 description: "Replace secrets in chat with {{SECRET:name}} placeholders; resolve them only at tool time."
 author: JYUN MING CHEN
 license: MIT
 homepage: https://github.com/jimmy77733/secret-vault
 requires_hermes: ">=0.23.0"
 tags: [security, secrets, dpapi, redaction]
-provides_hooks: [pre_gateway_dispatch, pre_tool_call, transform_tool_result, transform_terminal_output, transform_llm_output]
+provides_hooks: [pre_gateway_dispatch, post_gateway_admission, pre_tool_call, transform_tool_result, transform_terminal_output, transform_llm_output]
 config_schema:
   detect_generic:
     type: bool
